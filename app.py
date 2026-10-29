@@ -1,12 +1,3 @@
-"""
-LLM Political Debate
---------------------
-Two free LLMs (served by Groq's free tier) debate the politics of a country:
-  * LLM 1 speaks for the GOVERNMENT
-  * LLM 2 speaks for the OPPOSITION
-The user picks the country and the number of rounds (max 10) in a Gradio UI.
-"""
-
 import os
 import re
 import time
@@ -15,27 +6,19 @@ import gradio as gr
 from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-load_dotenv()  # reads GROQ_API_KEY from a local .env file (never committed)
+load_dotenv()
 
 API_KEY = os.getenv("GROQ_API_KEY")
-BASE_URL = "https://api.groq.com/openai/v1"  # Groq is OpenAI-compatible
+BASE_URL = "https://api.groq.com/openai/v1"
 
-# Free models on Groq. You can override them in .env if Groq changes its list:
-# https://console.groq.com/docs/models
 GOV_MODEL = os.getenv("GOV_MODEL", "openai/gpt-oss-120b")
 OPP_MODEL = os.getenv("OPP_MODEL", "openai/gpt-oss-20b")
 
-MAX_ROUNDS = 10  # hard limit required by the assignment
+MAX_ROUNDS = 10
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL) if API_KEY else None
 
 
-# ---------------------------------------------------------------------------
-# System prompts
-# ---------------------------------------------------------------------------
 def government_prompt(country: str, topic: str) -> str:
     return f"""You are a senior spokesperson for the CURRENT GOVERNMENT of {country}.
 You are in a televised political debate with a member of the opposition.
@@ -68,36 +51,21 @@ Rules you must follow:
 5. Keep each turn under 180 words. Do not speak for the government."""
 
 
-# ---------------------------------------------------------------------------
-# LLM call
-# ---------------------------------------------------------------------------
-# Groq's free tier has a low tokens-per-minute (TPM) limit. Keeping the model's
-# own context short and retrying on 429 keeps long debates (up to 10 rounds)
-# running reliably without the user having to do anything.
-HISTORY_TURNS_KEPT = 6   # last 6 messages (~3 rounds) of context sent to each model
+HISTORY_TURNS_KEPT = 6
 MAX_RETRIES = 5
 WAIT_RE = re.compile(r"try again in ([\d.]+)(ms|s)", re.IGNORECASE)
 
 
 def _extract_wait_seconds(error_message: str, attempt: int) -> float:
-    """Read Groq's own 'try again in Xms/Xs' hint from the error, or fall back
-    to exponential backoff (2, 4, 8, 16... seconds, capped at 20)."""
     match = WAIT_RE.search(error_message)
     if match:
         value, unit = float(match.group(1)), match.group(2).lower()
         seconds = value / 1000 if unit == "ms" else value
-        return min(max(seconds, 1.0) + 0.5, 20.0)  # small safety margin, cap at 20s
+        return min(max(seconds, 1.0) + 0.5, 20.0)
     return min(2 ** attempt, 20.0)
 
 
 def ask_llm(model: str, system_prompt: str, history: list, me: str) -> str:
-    """Send the debate so far to one LLM, retrying automatically on rate limits.
-
-    `history` is a list of (speaker, text). The speaker's own past turns are sent
-    as 'assistant' messages and the other side's turns as 'user' messages, so each
-    model sees the debate from its own point of view. Only the most recent turns
-    are sent (HISTORY_TURNS_KEPT) to stay well under the free tier's token limit.
-    """
     messages = [{"role": "system", "content": system_prompt}]
     if not history:
         messages.append({"role": "user", "content": "The moderator opens the debate. Please give your opening statement."})
@@ -117,30 +85,25 @@ def ask_llm(model: str, system_prompt: str, history: list, me: str) -> str:
             return (response.choices[0].message.content or "").strip()
         except RateLimitError as e:
             last_error = e
-            wait_s = _extract_wait_seconds(str(e), attempt)
-            time.sleep(wait_s)
+            time.sleep(_extract_wait_seconds(str(e), attempt))
     raise last_error
 
 
-# ---------------------------------------------------------------------------
-# Debate loop (generator -> the UI updates after every turn)
-# ---------------------------------------------------------------------------
 def run_debate(country: str, topic: str, rounds: int):
     if client is None:
         raise gr.Error("GROQ_API_KEY is missing. Put it in a .env file (see README).")
     country = (country or "").strip()
     if not country:
         raise gr.Error("Please type a country name.")
-    rounds = max(1, min(int(rounds), MAX_ROUNDS))  # enforce the 10-round limit
+    rounds = max(1, min(int(rounds), MAX_ROUNDS))
 
     gov_sys = government_prompt(country, topic)
     opp_sys = opposition_prompt(country, topic)
 
-    history = []  # (speaker, text)
-    chat = []     # what the Gradio Chatbot shows
+    history = []
+    chat = []
 
     for r in range(1, rounds + 1):
-        # Government speaks
         try:
             gov = ask_llm(GOV_MODEL, gov_sys, history, me="gov")
         except Exception as e:
@@ -149,7 +112,6 @@ def run_debate(country: str, topic: str, rounds: int):
         chat.append({"role": "user", "content": f"**🏛️ Government — Round {r}**\n\n{gov}"})
         yield chat, f"Round {r}/{rounds}: government spoke…"
 
-        # Opposition replies
         try:
             opp = ask_llm(OPP_MODEL, opp_sys, history, me="opp")
         except Exception as e:
@@ -161,9 +123,6 @@ def run_debate(country: str, topic: str, rounds: int):
     yield chat, f"✅ Debate on {country} finished after {rounds} round(s)."
 
 
-# ---------------------------------------------------------------------------
-# Gradio UI
-# ---------------------------------------------------------------------------
 with gr.Blocks(title="LLM Political Debate") as demo:
     gr.Markdown(
         "# 🗳️ LLM Political Debate\n"
